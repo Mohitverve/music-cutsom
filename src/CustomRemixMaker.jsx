@@ -4,13 +4,12 @@ import { Upload, Button, message, Select, Slider } from "antd";
 import { UploadOutlined, AudioOutlined } from "@ant-design/icons";
 import { ReactSortable } from "react-sortablejs";
 
-// Wavesurfer
+// Wavesurfer core + plugin
 import WaveSurfer from "wavesurfer.js";
-import RegionsPlugin from "wavesurfer.js/src/plugin/regions.js";
+import RegionsPlugin from "wavesurfer.js/dist/plugins/regions.js";
 
 /**
- * Waveform component for trimming.
- * Accepts an audioUrl, initial trimStart/trimEnd, and a callback onRegionChange.
+ * WaveformTrimmer uses Wavesurfer to let users visually trim start/end.
  */
 function WaveformTrimmer({ audioUrl, clip, onTrimChange }) {
   const waveformRef = useRef(null);
@@ -19,48 +18,48 @@ function WaveformTrimmer({ audioUrl, clip, onTrimChange }) {
   useEffect(() => {
     if (!audioUrl) return;
 
-    // Cleanup old wavesurfer instance if re-render
+    // Destroy any old instance
     if (waveSurfer.current) {
       waveSurfer.current.destroy();
       waveSurfer.current = null;
     }
 
-    // Create a new wavesurfer instance
+    // Create new WaveSurfer instance
     waveSurfer.current = WaveSurfer.create({
       container: waveformRef.current,
       waveColor: "#999",
       progressColor: "#555",
       responsive: true,
       plugins: [
-        RegionsPlugin.create({})
-      ]
+        RegionsPlugin.create({
+          dragSelection: true,
+        }),
+      ],
     });
 
-    // Load the audio file
     waveSurfer.current.load(audioUrl);
 
-    // Once ready, add a region from clip.trimStart to clip.trimEnd
     waveSurfer.current.on("ready", () => {
       const duration = waveSurfer.current.getDuration();
-
-      const start = clip.trimStart >= 0 ? clip.trimStart : 0;
-      const end = (clip.trimEnd && clip.trimEnd <= duration) ? clip.trimEnd : duration;
+      // default region from trimStart->trimEnd
+      const start = clip.trimStart || 0;
+      const end =
+        clip.trimEnd && clip.trimEnd < duration ? clip.trimEnd : duration;
 
       waveSurfer.current.addRegion({
         start,
         end,
         drag: true,
         resize: true,
-        color: "rgba(255, 165, 0, 0.2)"
+        color: "rgba(255, 165, 0, 0.2)",
       });
     });
 
-    // Listen for region updates
     waveSurfer.current.on("region-updated", (region) => {
       // region.start, region.end in seconds
       onTrimChange({
         trimStart: region.start,
-        trimEnd: region.end
+        trimEnd: region.end,
       });
     });
 
@@ -72,18 +71,14 @@ function WaveformTrimmer({ audioUrl, clip, onTrimChange }) {
     };
   }, [audioUrl]);
 
-  return (
-    <div>
-      <div ref={waveformRef} style={{ width: "100%", margin: "0 auto" }} />
-    </div>
-  );
+  return <div ref={waveformRef} style={{ width: "100%", margin: "0 auto" }} />;
 }
 
 const { Option } = Select;
 
 const AdvancedRemixMaker = () => {
-  const [uploadedFiles, setUploadedFiles] = useState([]); // All files
-  const [orderedClips, setOrderedClips] = useState([]);   // For drag-n-drop
+  const [uploadedFiles, setUploadedFiles] = useState([]);
+  const [orderedClips, setOrderedClips] = useState([]);
   const [remixUrl, setRemixUrl] = useState(null);
   const [remixing, setRemixing] = useState(false);
 
@@ -93,28 +88,32 @@ const AdvancedRemixMaker = () => {
 
   const [backgroundMusic, setBackgroundMusic] = useState(null);
 
-  // ----- 1) Custom upload to Flask -----
+  // Adjust this to your actual backend domain:
+  const baseURL = "https://web-production-a2ce.up.railway.app";
+
+  // ---------------------------------------
+  // 1) Custom file upload
+  // ---------------------------------------
   const customUpload = async ({ file, onSuccess, onError }) => {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      // Make sure you don't have double slashes in your base URL!
-      // For demonstration, assume your base:
-      const baseURL = "https://web-production-a2ce.up.railway.app"; 
+
       const response = await axios.post(`${baseURL}/upload`, formData, {
         headers: { "Content-Type": "multipart/form-data" },
       });
+
       const fileUrl = response.data.url;
-      // For new clips, default trimStart=0, trimEnd=some big number, speed=1.0
       const newClip = {
         name: file.name,
         url: fileUrl,
         trimStart: 0,
-        trimEnd: 0, // We'll fix this once waveSurfer loads
+        trimEnd: 0, // will be set once waveSurfer loads
         speed: 1.0,
       };
       setUploadedFiles((prev) => [...prev, newClip]);
       setOrderedClips((prev) => [...prev, newClip]);
+
       onSuccess("ok");
     } catch (error) {
       console.error("Upload error:", error);
@@ -123,16 +122,18 @@ const AdvancedRemixMaker = () => {
     }
   };
 
-  // ----- 2) MediaRecorder for voice recording -----
+  // ---------------------------------------
+  // 2) Audio Recording
+  // ---------------------------------------
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaRecorderRef.current = new MediaRecorder(stream);
       recordedChunksRef.current = [];
 
-      mediaRecorderRef.current.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          recordedChunksRef.current.push(event.data);
+      mediaRecorderRef.current.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          recordedChunksRef.current.push(e.data);
         }
       };
 
@@ -157,7 +158,7 @@ const AdvancedRemixMaker = () => {
   const handleRecordingStop = async () => {
     const blob = new Blob(recordedChunksRef.current, { type: "audio/webm" });
     const file = new File([blob], "recording.webm", { type: "audio/webm" });
-    // Reuse the custom upload logic
+
     customUpload({
       file,
       onSuccess: () => message.success("Recording uploaded"),
@@ -165,7 +166,9 @@ const AdvancedRemixMaker = () => {
     });
   };
 
-  // ----- 3) Handle the final Remix creation -----
+  // ---------------------------------------
+  // 3) Handle final remix
+  // ---------------------------------------
   const handleRemix = async () => {
     if (orderedClips.length === 0) {
       message.error("Please add at least one audio clip.");
@@ -176,10 +179,9 @@ const AdvancedRemixMaker = () => {
     setRemixUrl(null);
 
     try {
-      // The server expects "clips": array of { url, trimStart, trimEnd, speed }
-      // Ensure trimEnd is at least > 0 if waveSurfer hasn't updated it
+      // Build payload
       const clipsPayload = orderedClips.map((clip) => {
-        const safeTrimEnd = clip.trimEnd > 0 ? clip.trimEnd : 99999; // big number
+        const safeTrimEnd = clip.trimEnd > 0 ? clip.trimEnd : 9999; // fallback
         return {
           url: clip.url,
           trimStart: clip.trimStart,
@@ -193,12 +195,10 @@ const AdvancedRemixMaker = () => {
         payload.backgroundMusic = backgroundMusic;
       }
 
-      const baseURL = "https://web-production-a2ce.up.railway.app";
       const response = await axios.post(`${baseURL}/remix`, payload, {
-        responseType: "blob", // we expect an mp3 file
+        responseType: "blob",
       });
 
-      // Create a blob URL for preview
       const blob = new Blob([response.data], { type: "audio/mpeg" });
       const remixDownloadUrl = URL.createObjectURL(blob);
       setRemixUrl(remixDownloadUrl);
@@ -211,12 +211,13 @@ const AdvancedRemixMaker = () => {
     setRemixing(false);
   };
 
-  // ----- 4) Handle user trimming/speed changes for each clip -----
-  const updateClip = (clipIndex, newData) => {
-    // newData could be { trimStart, trimEnd } or { speed }
+  // ---------------------------------------
+  // 4) Update clip properties (trim, speed)
+  // ---------------------------------------
+  const updateClip = (index, newData) => {
     setOrderedClips((prev) =>
       prev.map((clip, i) => {
-        if (i === clipIndex) {
+        if (i === index) {
           return { ...clip, ...newData };
         }
         return clip;
@@ -224,21 +225,20 @@ const AdvancedRemixMaker = () => {
     );
   };
 
-  // ----- 5) Predefined background music, or user upload -----
-  // Here are some placeholders if you have them:
+  // ---------------------------------------
+  // 5) Background music
+  // ---------------------------------------
   const backgroundOptions = [
     { label: "None", value: null },
     { label: "Romantic Piano", value: "/uploads/romantic_piano.mp3" },
     { label: "Soft Guitar", value: "/uploads/soft_guitar.mp3" },
   ];
 
-  // For user-uploaded background track, we can add a separate Upload or reuse
-  // the same approach. Example:
+  // Let user upload a custom background track
   const handleBgUpload = async (file) => {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const baseURL = "https://web-production-a2ce.up.railway.app";
       const response = await axios.post(`${baseURL}/upload`, formData, {
         headers: { "Content-Type": "multipart/form-data" },
       });
@@ -249,14 +249,17 @@ const AdvancedRemixMaker = () => {
     }
   };
 
+  // ---------------------------------------
+  // Render
+  // ---------------------------------------
   return (
     <div style={{ padding: 20 }}>
       <h1>Advanced Remix Maker</h1>
       <p>
-        Record or upload audio clips, trim them, change speed, and overlay optional background music.
+        Record or upload audio clips, visually trim, adjust speed, and overlay optional background music.
       </p>
 
-      {/* ========== Upload & Recording ========== */}
+      {/* Upload & Recording */}
       <div style={{ marginBottom: 20 }}>
         <Upload
           customRequest={customUpload}
@@ -268,23 +271,22 @@ const AdvancedRemixMaker = () => {
         </Upload>
 
         <Button
-          type="default"
+          style={{ marginLeft: 10 }}
           icon={<AudioOutlined />}
           onClick={recording ? stopRecording : startRecording}
-          style={{ marginLeft: 10 }}
         >
-          {recording ? "Stop Recording" : "Start Recording"}
+          {recording ? "Stop Recording" : "Record Audio"}
         </Button>
       </div>
 
-      {/* ========== Background Music Options ========== */}
+      {/* Background Music Selection */}
       <div style={{ marginBottom: 20 }}>
-        <p><strong>Select or Upload Background Music (optional):</strong></p>
+        <p><strong>Background Music (optional):</strong></p>
         <Select
           style={{ width: 250, marginRight: 10 }}
-          placeholder="Select Background Music"
           onChange={(value) => setBackgroundMusic(value)}
           value={backgroundMusic}
+          placeholder="Select Background Music"
         >
           {backgroundOptions.map((opt) => (
             <Option key={opt.value || "none"} value={opt.value}>
@@ -292,36 +294,35 @@ const AdvancedRemixMaker = () => {
             </Option>
           ))}
         </Select>
-        {/* Optional: upload your own BG track */}
+
         <Upload
           accept="audio/*"
           showUploadList={false}
           beforeUpload={(file) => {
             handleBgUpload(file);
-            return false; // so it doesn't auto-upload
+            return false; // prevent auto-upload
           }}
         >
           <Button>Upload Custom BG</Button>
         </Upload>
       </div>
 
-      {/* ========== Drag-and-Drop List of Clips ========== */}
+      {/* Drag-and-Drop Clips */}
       <div style={{ marginBottom: 20 }}>
         <h3>Audio Clips (drag to reorder):</h3>
         <ReactSortable
           list={orderedClips}
           setList={setOrderedClips}
-          tag="div"
-          style={{ minHeight: "20px", border: "1px dashed #ccc", padding: "10px" }}
+          style={{ border: "1px dashed #ccc", padding: 10 }}
           options={{ animation: 150 }}
         >
           {orderedClips.map((clip, index) => (
             <div
               key={clip.url}
               style={{
+                marginBottom: 15,
                 padding: 10,
                 border: "1px solid #ddd",
-                marginBottom: 10,
                 background: "#fafafa",
                 cursor: "move",
               }}
@@ -329,13 +330,15 @@ const AdvancedRemixMaker = () => {
               <div style={{ marginBottom: 5 }}>
                 <strong>{clip.name}</strong>
               </div>
-              {/* Waveform for trimming */}
+
+              {/* Waveform for Trimming */}
               <WaveformTrimmer
                 audioUrl={clip.url}
                 clip={clip}
                 onTrimChange={(trimData) => updateClip(index, trimData)}
               />
-              {/* Speed control */}
+
+              {/* Speed Control */}
               <div style={{ marginTop: 10 }}>
                 <span>Speed: </span>
                 <Slider
@@ -344,8 +347,7 @@ const AdvancedRemixMaker = () => {
                   step={0.1}
                   value={clip.speed}
                   onChange={(val) => updateClip(index, { speed: val })}
-                  tooltip={{ open: false }}
-                  style={{ width: 200, display: "inline-block", marginRight: 10 }}
+                  style={{ width: 200, display: "inline-block" }}
                 />
                 <span style={{ marginLeft: 10 }}>{clip.speed.toFixed(1)}x</span>
               </div>
@@ -354,14 +356,14 @@ const AdvancedRemixMaker = () => {
         </ReactSortable>
       </div>
 
-      {/* ========== Create Remix Button ========== */}
+      {/* Create Remix Button */}
       <div style={{ marginBottom: 20 }}>
         <Button type="primary" onClick={handleRemix} loading={remixing}>
           Create Remix
         </Button>
       </div>
 
-      {/* ========== Remix Preview & Download ========== */}
+      {/* Remix Preview & Download */}
       {remixUrl && (
         <div>
           <h3>Remix Preview:</h3>
